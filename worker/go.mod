@@ -6,5 +6,6 @@ require (
 	github.com/IBM/sarama v1.43.3
 	github.com/lib/pq v1.10.9
 	github.com/alecthomas/kingpin/v2 v2.4.0
+	github.com/sony/gobreaker/v2 v2.3.0
 )
 

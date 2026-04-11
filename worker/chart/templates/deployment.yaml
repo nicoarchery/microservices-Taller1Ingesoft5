@@ -17,3 +17,10 @@ spec:
       containers:
       - image: {{ .Values.image }}
         name: worker
+        env:
+        - name: DB_RETRY_INITIAL
+          value: {{ .Values.resilience.dbRetry.initial | quote }}
+        - name: DB_RETRY_MAX
+          value: {{ .Values.resilience.dbRetry.max | quote }}
+        - name: DB_RETRY_JITTER
+          value: {{ .Values.resilience.dbRetry.jitter | quote }}

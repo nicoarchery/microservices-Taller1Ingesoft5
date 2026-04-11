@@ -1,6 +1,6 @@
 .PHONY: start
 start:
-	go run main.go
+	go run .
 
 .PHONY: debug
 debug:
