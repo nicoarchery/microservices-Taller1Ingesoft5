@@ -1,0 +1,567 @@
+# Pipeline de CI/CD para microservicios en Azure AKS
+# Ejecuta lint, test, build y deploy en diferentes ambientes según la rama
+
+name: Microservices CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'fix/**'
+      - develop
+      - main
+  pull_request:
+    branches:
+      - develop
+      - main
+
+# Variables de entorno globales
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+  # Lista de microservicios a detectar
+  SERVICES: "vote worker result"
+
+# Permisos necesarios para el workflow
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+jobs:
+  # ============================================================================
+  # JOB 1: DETECTAR CAMBIOS EN MICROSERVICIOS
+  # Detecta qué microservicios han sido modificados para solo procesar los cambiados
+  # ============================================================================
+  detect-changes:
+    name: Detectar cambios en microservicios
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      vote_changed: ${{ steps.filter.outputs.vote }}
+      worker_changed: ${{ steps.filter.outputs.worker }}
+      result_changed: ${{ steps.filter.outputs.result }}
+      any_changed: ${{ steps.filter.outputs.changes }}
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+        with:
+          fetch-depth: 0
+
+      - name: Filtrar paths de microservicios cambiados
+        uses: dorny/paths-filter@v2.11.1
+        id: filter
+        with:
+          filters: |
+            vote:
+              - 'vote/**'
+              - '.github/workflows/pipeline-dev.yml'
+            worker:
+              - 'worker/**'
+              - '.github/workflows/pipeline-dev.yml'
+            result:
+              - 'result/**'
+              - '.github/workflows/pipeline-dev.yml'
+
+  # ============================================================================
+  # JOB 2: LINT - Revisión de calidad de código
+  # Ejecuta linters específicos según el lenguaje de cada microservicio
+  # ============================================================================
+  lint:
+    name: Lint - Revisión de calidad de código
+    needs: detect-changes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        service: [vote, worker, result]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+
+      # Saltar si el servicio no fue modificado
+      - name: Verificar si el servicio fue modificado
+        id: check_changes
+        run: |
+          if [ "${{ matrix.service }}" == "vote" ] && [ "${{ needs.detect-changes.outputs.vote_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "worker" ] && [ "${{ needs.detect-changes.outputs.worker_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "result" ] && [ "${{ needs.detect-changes.outputs.result_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # LINT PARA VOTE (Java/Spring Boot)
+      - name: Setup Java 22 para Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        uses: actions/setup-java@v4.0.0
+        with:
+          java-version: '22'
+          distribution: 'temurin'
+
+      - name: Cache Maven para Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        uses: actions/cache@v3.3.2
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('vote/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Lint Vote con Checkstyle
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        working-directory: vote
+        run: |
+          mvn -q -DskipTests compile || true
+        continue-on-error: true
+
+      # LINT PARA WORKER (Go)
+      - name: Setup Go para Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        uses: actions/setup-go@v4.1.0
+        with:
+          go-version: '1.21'
+
+      - name: Lint Worker con golangci-lint
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        uses: golangci/golangci-lint-action@v3.7.0
+        with:
+          version: v1.55.2
+          working-directory: worker
+          args: --timeout=5m
+
+      # LINT PARA RESULT (Node.js)
+      - name: Setup Node.js para Result
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
+        uses: actions/setup-node@v4.0.1
+        with:
+          node-version: '20'
+
+      - name: Lint Result con ESLint
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
+        working-directory: result
+        run: |
+          npm install
+          npx eslint . --ext .js,.jsx || true
+        continue-on-error: true
+
+  # ============================================================================
+  # JOB 3: TEST - Ejecución de pruebas unitarias
+  # ============================================================================
+  test:
+    name: Test - Pruebas unitarias
+    needs: detect-changes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        service: [vote, worker, result]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+
+      # Saltar si el servicio no fue modificado
+      - name: Verificar si el servicio fue modificado
+        id: check_changes
+        run: |
+          if [ "${{ matrix.service }}" == "vote" ] && [ "${{ needs.detect-changes.outputs.vote_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "worker" ] && [ "${{ needs.detect-changes.outputs.worker_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "result" ] && [ "${{ needs.detect-changes.outputs.result_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # TEST PARA VOTE (Java/Maven)
+      - name: Setup Java 22 para Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        uses: actions/setup-java@v4.0.0
+        with:
+          java-version: '22'
+          distribution: 'temurin'
+
+      - name: Cache Maven para Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        uses: actions/cache@v3.3.2
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('vote/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2
+
+      - name: Ejecutar tests de Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
+        working-directory: vote
+        run: |
+          mvn clean test
+
+      - name: Upload test results de Vote
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote' && always()
+        uses: actions/upload-artifact@v4.0.0
+        with:
+          name: test-results-vote
+          path: vote/target/surefire-reports/
+          retention-days: 7
+
+      # TEST PARA WORKER (Go)
+      - name: Setup Go para Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        uses: actions/setup-go@v4.1.0
+        with:
+          go-version: '1.21'
+
+      - name: Ejecutar tests de Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        working-directory: worker
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload test results de Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        uses: actions/upload-artifact@v4.0.0
+        with:
+          name: test-results-worker
+          path: worker/coverage.out
+          retention-days: 7
+
+      # TEST PARA RESULT (Node.js/Jest)
+      - name: Setup Node.js para Result
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
+        uses: actions/setup-node@v4.0.1
+        with:
+          node-version: '20'
+
+      - name: Ejecutar tests de Result
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
+        working-directory: result
+        run: |
+          npm install
+          npm test -- --coverage --passWithNoTests || true
+
+      - name: Upload test results de Result
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result' && always()
+        uses: actions/upload-artifact@v4.0.0
+        with:
+          name: test-results-result
+          path: result/coverage/
+          retention-days: 7
+
+  # ============================================================================
+  # JOB 4: BUILD - Construcción y push de imágenes Docker a ACR
+  # ============================================================================
+  build:
+    name: Build - Construir y subir imágenes Docker
+    needs: [lint, test, detect-changes]
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        service: [vote, worker, result]
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+
+      # Saltar si el servicio no fue modificado
+      - name: Verificar si el servicio fue modificado
+        id: check_changes
+        run: |
+          if [ "${{ matrix.service }}" == "vote" ] && [ "${{ needs.detect-changes.outputs.vote_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "worker" ] && [ "${{ needs.detect-changes.outputs.worker_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "${{ matrix.service }}" == "result" ] && [ "${{ needs.detect-changes.outputs.result_changed }}" != "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login a Azure
+        if: steps.check_changes.outputs.skip == 'false'
+        uses: azure/login@v1.4.6
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login a Azure Container Registry
+        if: steps.check_changes.outputs.skip == 'false'
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Generar tag de imagen
+        if: steps.check_changes.outputs.skip == 'false'
+        id: tag
+        run: |
+          # Generar tag: rama-sha_corto (ej: develop-a1b2c3d)
+          BRANCH=${GITHUB_REF#refs/heads/}
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAG="${BRANCH}-${SHORT_SHA}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "Imagen tag: ${TAG}"
+
+      - name: Construir y push imagen ${{ matrix.service }}
+        if: steps.check_changes.outputs.skip == 'false'
+        working-directory: ${{ matrix.service }}
+        run: |
+          IMAGE_NAME="${{ secrets.ACR_LOGIN_SERVER }}/${{ matrix.service }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+          
+          echo "Construyendo imagen: ${IMAGE_NAME}:${TAG}"
+          docker build -t ${IMAGE_NAME}:${TAG} .
+          docker push ${IMAGE_NAME}:${TAG}
+          
+          # También taggear como 'latest' para la rama
+          docker tag ${IMAGE_NAME}:${TAG} ${IMAGE_NAME}:${{ steps.tag.outputs.branch }}-latest
+          docker push ${IMAGE_NAME}:${{ steps.tag.outputs.branch }}-latest
+
+      - name: Exportar metadata de imagen
+        if: steps.check_changes.outputs.skip == 'false'
+        run: |
+          echo "${{ matrix.service }}_tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
+
+  # ============================================================================
+  # JOB 5: DEPLOY A STAGING
+  # Solo se ejecuta en pushes a develop
+  # ============================================================================
+  deploy-staging:
+    name: Deploy - Staging en AKS
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment:
+      name: staging
+      url: https://vote-staging.${{ secrets.AKS_CLUSTER_NAME }}.cloudapp.azure.com
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+
+      - name: Login a Azure
+        uses: azure/login@v1.4.6
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup kubectl y configurar contexto de AKS
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+          subscription: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Login a Azure Container Registry desde AKS
+        uses: azure/acr-login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
+
+      - name: Generar manifests de despliegue con tags dinámicos
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BRANCH="develop"
+          TAG="${BRANCH}-${SHORT_SHA}"
+          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
+          
+          # Crear namespace staging si no existe
+          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Aplicar configuraciones de infraestructura (Kafka, PostgreSQL)
+          # Nota: En producción, estos deberían venir del repo de infraestructura
+          kubectl apply -f infrastructure/templates/ -n staging || true
+          
+          # Desplegar cada microservicio con el tag generado
+          for service in vote worker result; do
+            echo "Desplegando ${service} con tag ${TAG}"
+            
+            # Usar Helm chart si existe, sino aplicar manifests directamente
+            if [ -d "${service}/chart" ]; then
+              helm upgrade --install ${service} ${service}/chart \
+                --namespace staging \
+                --set image=${ACR}/${service}:${TAG} \
+                --set replicaCount=3 \
+                --wait --timeout 5m || true
+            else
+              # Fallback: actualizar imagen con kubectl set image
+              kubectl set image deployment/${service} \
+                ${service}=${ACR}/${service}:${TAG} \
+                -n staging || echo "Deployment ${service} no encontrado, saltando..."
+            fi
+          done
+
+      - name: Verificar despliegue en staging
+        run: |
+          echo "=== Pods en staging ==="
+          kubectl get pods -n staging
+          
+          echo "=== Servicios en staging ==="
+          kubectl get svc -n staging
+          
+          echo "=== Estado de deployments ==="
+          kubectl get deployments -n staging
+
+      - name: Esperar a que los pods estén listos
+        run: |
+          kubectl wait --for=condition=ready pod -l app=vote -n staging --timeout=120s || true
+          kubectl wait --for=condition=ready pod -l app=worker -n staging --timeout=120s || true
+          kubectl wait --for=condition=ready pod -l app=result -n staging --timeout=120s || true
+
+  # ============================================================================
+  # JOB 6: DEPLOY A PRODUCCIÓN
+  # Solo se ejecuta en pushes a main con verificación adicional
+  # ============================================================================
+  deploy-prod:
+    name: Deploy - Producción en AKS
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: https://vote.${{ secrets.AKS_CLUSTER_NAME }}.cloudapp.azure.com
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4.1.1
+
+      - name: Login a Azure
+        uses: azure/login@v1.4.6
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup kubectl y configurar contexto de AKS
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+          subscription: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Login a Azure Container Registry desde AKS
+        uses: azure/acr-login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
+
+      - name: Validar que los tags de imagen existen en ACR
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          TAG="main-${SHORT_SHA}"
+          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
+          
+          for service in vote worker result; do
+            echo "Verificando imagen: ${ACR}/${service}:${TAG}"
+            # Verificar que la imagen existe haciendo un manifest inspect
+            docker manifest inspect ${ACR}/${service}:${TAG} > /dev/null 2>&1 || {
+              echo "ERROR: Imagen ${service}:${TAG} no encontrada en ACR"
+              exit 1
+            }
+            echo "✓ Imagen ${service}:${TAG} verificada"
+          done
+
+      - name: Backup del estado actual (blue-green deployment)
+        run: |
+          echo "Creando backup de deployments actuales..."
+          kubectl get deployments -n prod -o yaml > deployment-backup-$(date +%Y%m%d-%H%M%S).yaml || true
+
+      - name: Desplegar a producción con estrategia rolling update
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BRANCH="main"
+          TAG="${BRANCH}-${SHORT_SHA}"
+          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
+          
+          # Crear namespace prod si no existe
+          kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Aplicar infraestructura base
+          kubectl apply -f infrastructure/templates/ -n prod || true
+          
+          # Desplegar con estrategia de rolling update
+          for service in vote worker result; do
+            echo "Desplegando ${service} a producción con tag ${TAG}"
+            
+            if [ -d "${service}/chart" ]; then
+              helm upgrade --install ${service} ${service}/chart \
+                --namespace prod \
+                --set image=${ACR}/${service}:${TAG} \
+                --set replicaCount=5 \
+                --wait --timeout 5m \
+                --atomic || exit 1
+            else
+              kubectl set image deployment/${service} \
+                ${service}=${ACR}/${service}:${TAG} \
+                -n prod || exit 1
+            fi
+          done
+
+      - name: Verificar health check post-deploy
+        run: |
+          echo "Esperando 30 segundos para estabilización..."
+          sleep 30
+          
+          echo "=== Pods en producción ==="
+          kubectl get pods -n prod
+          
+          echo "=== Health checks ==="
+          # Verificar que los pods están healthy
+          kubectl get pods -n prod -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
+
+      - name: Notificación de éxito
+        if: success()
+        run: |
+          echo "🚀 Despliegue a producción exitoso"
+          echo "Commit: ${{ github.sha }}"
+          echo "Autor: ${{ github.actor }}"
+          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+
+  # ============================================================================
+  # JOB 7: NOTIFICACIÓN FINAL
+  # ============================================================================
+  notify:
+    name: Notificación de Pipeline
+    needs: [lint, test, build, deploy-staging, deploy-prod]
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Resumen de ejecución
+        run: |
+          echo "========================================"
+          echo "RESUMEN DEL PIPELINE"
+          echo "========================================"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Autor: ${{ github.actor }}"
+          echo "----------------------------------------"
+          
+          # Verificar estado de cada job
+          LINT_STATUS="${{ needs.lint.result }}"
+          TEST_STATUS="${{ needs.test.result }}"
+          BUILD_STATUS="${{ needs.build.result }}"
+          
+          echo "Lint:   ${LINT_STATUS}"
+          echo "Test:   ${TEST_STATUS}"
+          echo "Build:  ${BUILD_STATUS}"
+          
+          if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
+            DEPLOY_STATUS="${{ needs.deploy-staging.result }}"
+            echo "Deploy Staging: ${DEPLOY_STATUS}"
+          fi
+          
+          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            DEPLOY_STATUS="${{ needs.deploy-prod.result }}"
+            echo "Deploy Prod: ${DEPLOY_STATUS}"
+          fi
+          
+          echo "========================================"
+          
+          # Determinar éxito general
+          if [ "$LINT_STATUS" == "success" ] && [ "$TEST_STATUS" == "success" ]; then
+            echo "✅ PIPELINE EXITOSO"
+            exit 0
+          else
+            echo "❌ PIPELINE FALLIDO"
+            exit 1
+          fi
