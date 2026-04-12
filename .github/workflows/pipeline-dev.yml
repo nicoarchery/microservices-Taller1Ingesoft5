@@ -129,12 +129,13 @@ jobs:
         working-directory: worker
         run: |
           go mod tidy
+          go mod download
 
       - name: Lint Worker con golangci-lint
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
         uses: golangci/golangci-lint-action@v8
         with:
-          version: v1.55.2
+          version: latest
           working-directory: worker
           args: --timeout=5m
 
@@ -227,6 +228,7 @@ jobs:
         working-directory: worker
         run: |
           go mod tidy
+          go mod download
 
       - name: Ejecutar tests de Worker
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
