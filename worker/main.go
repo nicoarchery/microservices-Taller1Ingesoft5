@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -26,6 +28,7 @@ var (
 
 	brokerList        = kingpin.Flag("brokerList", "List of brokers to connect").Default("kafka:9092").Strings()
 	topic             = kingpin.Flag("topic", "Topic name").Default("votes").String()
+	consumerGroup     = kingpin.Flag("consumerGroup", "Consumer group ID").Default("vote-workers").String()
 	messageCountStart = kingpin.Flag("messageCountStart", "Message counter start from:").Int()
 )
 
@@ -39,6 +42,7 @@ const (
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
+	kingpin.Parse()
 
 	db := openDatabase()
 	defer db.Close()
@@ -50,35 +54,78 @@ func main() {
 		log.Panic(err)
 	}
 
-	master := getKafkaMaster()
-	defer master.Close()
+	config := sarama.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
-	consumer, err := master.ConsumePartition(*topic, 0, sarama.OffsetOldest)
-	if err != nil {
-		log.Panic(err)
-	}
+	brokers := *brokerList
+	groupID := *consumerGroup
+	topicName := *topic
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt)
-	doneCh := make(chan struct{})
+
+	handler := &VoteHandler{
+		store:     store,
+		msgCounter: messageCountStart,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
 		for {
-			select {
-			case err := <-consumer.Errors():
-				log.Println(err)
-			case msg := <-consumer.Messages():
-				*messageCountStart++
-				log.Printf("Received message: user %s vote %s", string(msg.Key), string(msg.Value))
-				persistVote(store, *messageCountStart, string(msg.Value))
-			case <-signals:
-				log.Println("Interrupt is detected")
-				doneCh <- struct{}{}
+			consumerGroup, err := sarama.NewConsumerGroup(brokers, groupID, config)
+			if err != nil {
+				log.Printf("Error creating consumer group: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
 			}
+
+			log.Printf("Connected to Kafka as consumer group: %s", groupID)
+
+			consumerErrors := consumerGroup.Errors()
+			done := make(chan struct{})
+
+			go func() {
+				for {
+					select {
+					case err := <-consumerErrors:
+						if err != nil {
+							log.Printf("Consumer error: %v", err)
+						}
+					case <-done:
+						return
+					}
+				}
+			}()
+
+			err = consumerGroup.Consume(ctx, []string{topicName}, handler)
+			close(done)
+			consumerGroup.Close()
+
+			if err != nil {
+				log.Printf("Error from consumer: %v", err)
+			}
+
+			if ctx.Err() != nil {
+				return
+			}
+
+			log.Println("Rebalancing or reconnecting...")
+			time.Sleep(2 * time.Second)
 		}
 	}()
 
-	<-doneCh
+	<-signals
+	log.Println("Interrupt detected, shutting down...")
+	cancel()
+	wg.Wait()
 	log.Println("Processed", *messageCountStart, "messages")
 }
 
@@ -104,6 +151,34 @@ func persistVote(store *storedb.Store, id int, vote string) {
 		time.Sleep(sleep)
 		retryDelay = nextRetryDelay(retryDelay)
 	}
+}
+
+// VoteHandler implements sarama.ConsumerGroupHandler for processing votes
+type VoteHandler struct {
+	store      *storedb.Store
+	msgCounter *int
+}
+
+func (h *VoteHandler) Setup(sarama.ConsumerGroupSession) error {
+	log.Println("Consumer group session started")
+	return nil
+}
+
+func (h *VoteHandler) Cleanup(sarama.ConsumerGroupSession) error {
+	log.Println("Consumer group session ended")
+	return nil
+}
+
+func (h *VoteHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for msg := range claim.Messages() {
+		*h.msgCounter++
+		log.Printf("[Worker] Received message: partition=%d offset=%d key=%s vote=%s",
+			msg.Partition, msg.Offset, string(msg.Key), string(msg.Value))
+
+		persistVote(h.store, *h.msgCounter, string(msg.Value))
+		session.MarkMessage(msg, "")
+	}
+	return nil
 }
 
 func nextRetryDelay(current time.Duration) time.Duration {
@@ -190,7 +265,6 @@ func pingDatabase(db *sql.DB) {
 }
 
 func getKafkaMaster() sarama.Consumer {
-	kingpin.Parse()
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
 	brokers := *brokerList
@@ -201,5 +275,6 @@ func getKafkaMaster() sarama.Consumer {
 			fmt.Println("Kafka connected!")
 			return master
 		}
+		time.Sleep(1 * time.Second)
 	}
 }
