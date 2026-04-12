@@ -19,6 +19,7 @@ on:
 env:
   # Lista de microservicios a detectar
   SERVICES: "vote worker result"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 # Permisos necesarios para el workflow
 permissions:
@@ -71,6 +72,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         service: [vote, worker, result]
     steps:
@@ -119,11 +121,18 @@ jobs:
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.24.x'
+          cache: false
+
+      - name: Preparar dependencias de Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        working-directory: worker
+        run: |
+          go mod tidy
 
       - name: Lint Worker con golangci-lint
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
-        uses: golangci/golangci-lint-action@v3.7.0
+        uses: golangci/golangci-lint-action@v8
         with:
           version: v1.55.2
           working-directory: worker
@@ -153,6 +162,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         service: [vote, worker, result]
     steps:
@@ -202,13 +212,21 @@ jobs:
           name: test-results-vote
           path: vote/target/surefire-reports/
           retention-days: 7
+          if-no-files-found: ignore
 
       # TEST PARA WORKER (Go)
       - name: Setup Go para Worker
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.24.x'
+          cache: false
+
+      - name: Preparar dependencias de Worker
+        if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
+        working-directory: worker
+        run: |
+          go mod tidy
 
       - name: Ejecutar tests de Worker
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
@@ -244,6 +262,7 @@ jobs:
           name: test-results-result
           path: result/coverage/
           retention-days: 7
+          if-no-files-found: ignore
 
   # ============================================================================
   # JOB 4: BUILD - Construcción y push de imágenes Docker a ACR
