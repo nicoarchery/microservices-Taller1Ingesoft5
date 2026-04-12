@@ -17,9 +17,6 @@ on:
 
 # Variables de entorno globales
 env:
-  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
-  AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
   # Lista de microservicios a detectar
   SERVICES: "vote worker result"
 
@@ -278,20 +275,6 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Login a Azure
-        if: steps.check_changes.outputs.skip == 'false'
-        uses: azure/login@v1.4.6
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Login a Azure Container Registry
-        if: steps.check_changes.outputs.skip == 'false'
-        uses: azure/docker-login@v1
-        with:
-          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
-
       - name: Generar tag de imagen
         if: steps.check_changes.outputs.skip == 'false'
         id: tag
@@ -304,224 +287,26 @@ jobs:
           echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
           echo "Imagen tag: ${TAG}"
 
-      - name: Construir y push imagen ${{ matrix.service }}
+      - name: Construir imagen ${{ matrix.service }}
         if: steps.check_changes.outputs.skip == 'false'
         working-directory: ${{ matrix.service }}
         run: |
-          IMAGE_NAME="${{ secrets.ACR_LOGIN_SERVER }}/${{ matrix.service }}"
           TAG="${{ steps.tag.outputs.tag }}"
           
-          echo "Construyendo imagen: ${IMAGE_NAME}:${TAG}"
-          docker build -t ${IMAGE_NAME}:${TAG} .
-          docker push ${IMAGE_NAME}:${TAG}
-          
-          # También taggear como 'latest' para la rama
-          docker tag ${IMAGE_NAME}:${TAG} ${IMAGE_NAME}:${{ steps.tag.outputs.branch }}-latest
-          docker push ${IMAGE_NAME}:${{ steps.tag.outputs.branch }}-latest
+          echo "Construyendo imagen local: ${{ matrix.service }}:${TAG}"
+          docker build -t ${{ matrix.service }}:${TAG} .
+          docker image ls | head
 
       - name: Exportar metadata de imagen
         if: steps.check_changes.outputs.skip == 'false'
         run: |
           echo "${{ matrix.service }}_tag=${{ steps.tag.outputs.tag }}" >> $GITHUB_ENV
-
-  # ============================================================================
-  # JOB 5: DEPLOY A STAGING
-  # Solo se ejecuta en pushes a develop
-  # ============================================================================
-  deploy-staging:
-    name: Deploy - Staging en AKS
-    needs: build
-    if: github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    environment:
-      name: staging
-      url: https://vote-staging.${{ secrets.AKS_CLUSTER_NAME }}.cloudapp.azure.com
-    steps:
-      - name: Checkout del código
-        uses: actions/checkout@v4.1.1
-
-      - name: Login a Azure
-        uses: azure/login@v1.4.6
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Setup kubectl y configurar contexto de AKS
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-          subscription: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-
-      - name: Login a Azure Container Registry desde AKS
-        uses: azure/acr-login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
-
-      - name: Generar manifests de despliegue con tags dinámicos
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          BRANCH="develop"
-          TAG="${BRANCH}-${SHORT_SHA}"
-          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
-          
-          # Crear namespace staging si no existe
-          kubectl create namespace staging --dry-run=client -o yaml | kubectl apply -f -
-          
-          # Aplicar configuraciones de infraestructura (Kafka, PostgreSQL)
-          # Nota: En producción, estos deberían venir del repo de infraestructura
-          kubectl apply -f infrastructure/templates/ -n staging || true
-          
-          # Desplegar cada microservicio con el tag generado
-          for service in vote worker result; do
-            echo "Desplegando ${service} con tag ${TAG}"
-            
-            # Usar Helm chart si existe, sino aplicar manifests directamente
-            if [ -d "${service}/chart" ]; then
-              helm upgrade --install ${service} ${service}/chart \
-                --namespace staging \
-                --set image=${ACR}/${service}:${TAG} \
-                --set replicaCount=3 \
-                --wait --timeout 5m || true
-            else
-              # Fallback: actualizar imagen con kubectl set image
-              kubectl set image deployment/${service} \
-                ${service}=${ACR}/${service}:${TAG} \
-                -n staging || echo "Deployment ${service} no encontrado, saltando..."
-            fi
-          done
-
-      - name: Verificar despliegue en staging
-        run: |
-          echo "=== Pods en staging ==="
-          kubectl get pods -n staging
-          
-          echo "=== Servicios en staging ==="
-          kubectl get svc -n staging
-          
-          echo "=== Estado de deployments ==="
-          kubectl get deployments -n staging
-
-      - name: Esperar a que los pods estén listos
-        run: |
-          kubectl wait --for=condition=ready pod -l app=vote -n staging --timeout=120s || true
-          kubectl wait --for=condition=ready pod -l app=worker -n staging --timeout=120s || true
-          kubectl wait --for=condition=ready pod -l app=result -n staging --timeout=120s || true
-
-  # ============================================================================
-  # JOB 6: DEPLOY A PRODUCCIÓN
-  # Solo se ejecuta en pushes a main con verificación adicional
-  # ============================================================================
-  deploy-prod:
-    name: Deploy - Producción en AKS
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    environment:
-      name: production
-      url: https://vote.${{ secrets.AKS_CLUSTER_NAME }}.cloudapp.azure.com
-    steps:
-      - name: Checkout del código
-        uses: actions/checkout@v4.1.1
-
-      - name: Login a Azure
-        uses: azure/login@v1.4.6
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Setup kubectl y configurar contexto de AKS
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-          subscription: ${{ secrets.ARM_SUBSCRIPTION_ID }}
-
-      - name: Login a Azure Container Registry desde AKS
-        uses: azure/acr-login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-          login-server: ${{ secrets.ACR_LOGIN_SERVER }}
-
-      - name: Validar que los tags de imagen existen en ACR
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          TAG="main-${SHORT_SHA}"
-          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
-          
-          for service in vote worker result; do
-            echo "Verificando imagen: ${ACR}/${service}:${TAG}"
-            # Verificar que la imagen existe haciendo un manifest inspect
-            docker manifest inspect ${ACR}/${service}:${TAG} > /dev/null 2>&1 || {
-              echo "ERROR: Imagen ${service}:${TAG} no encontrada en ACR"
-              exit 1
-            }
-            echo "✓ Imagen ${service}:${TAG} verificada"
-          done
-
-      - name: Backup del estado actual (blue-green deployment)
-        run: |
-          echo "Creando backup de deployments actuales..."
-          kubectl get deployments -n prod -o yaml > deployment-backup-$(date +%Y%m%d-%H%M%S).yaml || true
-
-      - name: Desplegar a producción con estrategia rolling update
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          BRANCH="main"
-          TAG="${BRANCH}-${SHORT_SHA}"
-          ACR="${{ secrets.ACR_LOGIN_SERVER }}"
-          
-          # Crear namespace prod si no existe
-          kubectl create namespace prod --dry-run=client -o yaml | kubectl apply -f -
-          
-          # Aplicar infraestructura base
-          kubectl apply -f infrastructure/templates/ -n prod || true
-          
-          # Desplegar con estrategia de rolling update
-          for service in vote worker result; do
-            echo "Desplegando ${service} a producción con tag ${TAG}"
-            
-            if [ -d "${service}/chart" ]; then
-              helm upgrade --install ${service} ${service}/chart \
-                --namespace prod \
-                --set image=${ACR}/${service}:${TAG} \
-                --set replicaCount=5 \
-                --wait --timeout 5m \
-                --atomic || exit 1
-            else
-              kubectl set image deployment/${service} \
-                ${service}=${ACR}/${service}:${TAG} \
-                -n prod || exit 1
-            fi
-          done
-
-      - name: Verificar health check post-deploy
-        run: |
-          echo "Esperando 30 segundos para estabilización..."
-          sleep 30
-          
-          echo "=== Pods en producción ==="
-          kubectl get pods -n prod
-          
-          echo "=== Health checks ==="
-          # Verificar que los pods están healthy
-          kubectl get pods -n prod -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\n"}{end}'
-
-      - name: Notificación de éxito
-        if: success()
-        run: |
-          echo "🚀 Despliegue a producción exitoso"
-          echo "Commit: ${{ github.sha }}"
-          echo "Autor: ${{ github.actor }}"
-          echo "Timestamp: $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-
   # ============================================================================
   # JOB 7: NOTIFICACIÓN FINAL
   # ============================================================================
   notify:
     name: Notificación de Pipeline
-    needs: [lint, test, build, deploy-staging, deploy-prod]
+    needs: [lint, test, build]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 5
@@ -529,7 +314,7 @@ jobs:
       - name: Resumen de ejecución
         run: |
           echo "========================================"
-          echo "RESUMEN DEL PIPELINE"
+          echo "RESUMEN DEL PIPELINE - CI BÁSICO"
           echo "========================================"
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
@@ -545,21 +330,13 @@ jobs:
           echo "Test:   ${TEST_STATUS}"
           echo "Build:  ${BUILD_STATUS}"
           
-          if [ "${{ github.ref }}" == "refs/heads/develop" ]; then
-            DEPLOY_STATUS="${{ needs.deploy-staging.result }}"
-            echo "Deploy Staging: ${DEPLOY_STATUS}"
-          fi
-          
-          if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-            DEPLOY_STATUS="${{ needs.deploy-prod.result }}"
-            echo "Deploy Prod: ${DEPLOY_STATUS}"
-          fi
-          
+          echo "========================================"
+          echo "📝 Esta versión corre solo CI local y build de imágenes"
           echo "========================================"
           
           # Determinar éxito general
           if [ "$LINT_STATUS" == "success" ] && [ "$TEST_STATUS" == "success" ]; then
-            echo "✅ PIPELINE EXITOSO"
+            echo "✅ PIPELINE CI EXITOSO"
             exit 0
           else
             echo "❌ PIPELINE FALLIDO"
