@@ -42,12 +42,12 @@ jobs:
       any_changed: ${{ steps.filter.outputs.changes }}
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Filtrar paths de microservicios cambiados
-        uses: dorny/paths-filter@v2.11.1
+        uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
@@ -75,7 +75,7 @@ jobs:
         service: [vote, worker, result]
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
 
       # Saltar si el servicio no fue modificado
       - name: Verificar si el servicio fue modificado
@@ -94,14 +94,14 @@ jobs:
       # LINT PARA VOTE (Java/Spring Boot)
       - name: Setup Java 22 para Vote
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
-        uses: actions/setup-java@v4.0.0
+        uses: actions/setup-java@v4
         with:
           java-version: '22'
           distribution: 'temurin'
 
       - name: Cache Maven para Vote
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
-        uses: actions/cache@v3.3.2
+        uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('vote/pom.xml') }}
@@ -117,7 +117,7 @@ jobs:
       # LINT PARA WORKER (Go)
       - name: Setup Go para Worker
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
-        uses: actions/setup-go@v4.1.0
+        uses: actions/setup-go@v5
         with:
           go-version: '1.21'
 
@@ -132,7 +132,7 @@ jobs:
       # LINT PARA RESULT (Node.js)
       - name: Setup Node.js para Result
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
-        uses: actions/setup-node@v4.0.1
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -157,7 +157,7 @@ jobs:
         service: [vote, worker, result]
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
 
       # Saltar si el servicio no fue modificado
       - name: Verificar si el servicio fue modificado
@@ -176,14 +176,14 @@ jobs:
       # TEST PARA VOTE (Java/Maven)
       - name: Setup Java 22 para Vote
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
-        uses: actions/setup-java@v4.0.0
+        uses: actions/setup-java@v4
         with:
           java-version: '22'
           distribution: 'temurin'
 
       - name: Cache Maven para Vote
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'vote'
-        uses: actions/cache@v3.3.2
+        uses: actions/cache@v4
         with:
           path: ~/.m2
           key: ${{ runner.os }}-m2-${{ hashFiles('vote/pom.xml') }}
@@ -206,7 +206,7 @@ jobs:
       # TEST PARA WORKER (Go)
       - name: Setup Go para Worker
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'worker'
-        uses: actions/setup-go@v4.1.0
+        uses: actions/setup-go@v5
         with:
           go-version: '1.21'
 
@@ -226,7 +226,7 @@ jobs:
       # TEST PARA RESULT (Node.js/Jest)
       - name: Setup Node.js para Result
         if: steps.check_changes.outputs.skip == 'false' && matrix.service == 'result'
-        uses: actions/setup-node@v4.0.1
+        uses: actions/setup-node@v4
         with:
           node-version: '20'
 
@@ -259,7 +259,7 @@ jobs:
         service: [vote, worker, result]
     steps:
       - name: Checkout del código
-        uses: actions/checkout@v4.1.1
+        uses: actions/checkout@v4
 
       # Saltar si el servicio no fue modificado
       - name: Verificar si el servicio fue modificado
