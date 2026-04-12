@@ -41,11 +41,14 @@ const (
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
 	kingpin.Parse()
 
 	db := openDatabase()
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("error closing database: %v", err)
+		}
+	}()
 
 	pingDatabase(db)
 
@@ -56,7 +59,7 @@ func main() {
 
 	config := sarama.NewConfig()
 	config.Consumer.Return.Errors = true
-	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRoundRobin()
 	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
 	brokers := *brokerList
@@ -107,7 +110,9 @@ func main() {
 
 			err = consumerGroup.Consume(ctx, []string{topicName}, handler)
 			close(done)
-			consumerGroup.Close()
+			if err := consumerGroup.Close(); err != nil {
+				log.Printf("error closing consumer group: %v", err)
+			}
 
 			if err != nil {
 				log.Printf("Error from consumer: %v", err)
@@ -259,21 +264,6 @@ func pingDatabase(db *sql.DB) {
 		if err := db.Ping(); err == nil {
 			fmt.Println("Postgresql connected!")
 			return
-		}
-		time.Sleep(1 * time.Second)
-	}
-}
-
-func getKafkaMaster() sarama.Consumer {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
-	brokers := *brokerList
-	fmt.Println("Waiting for kafka...")
-	for {
-		master, err := sarama.NewConsumer(brokers, config)
-		if err == nil {
-			fmt.Println("Kafka connected!")
-			return master
 		}
 		time.Sleep(1 * time.Second)
 	}
