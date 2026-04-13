@@ -49,7 +49,7 @@ func main() {
 			log.Printf("error closing database: %v", err)
 		}
 	}()
-
+//kkkkk
 	pingDatabase(db)
 
 	store := storedb.NewStore(db)
