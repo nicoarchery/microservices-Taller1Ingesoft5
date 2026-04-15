@@ -75,7 +75,7 @@ func main() {
 		store:     store,
 		msgCounter: messageCountStart,
 	}
-
+//5555
 	var wg sync.WaitGroup
 	wg.Add(1)
 

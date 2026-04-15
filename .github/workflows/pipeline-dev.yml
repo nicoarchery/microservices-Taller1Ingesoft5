@@ -4,12 +4,6 @@
 name: Microservices CI/CD Pipeline
 
 on:
-  push:
-    branches:
-      - 'feature/**'
-      - 'fix/**'
-      - develop
-      - main
   pull_request:
     branches:
       - develop
